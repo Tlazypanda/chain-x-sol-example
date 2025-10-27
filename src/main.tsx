@@ -3,12 +3,12 @@ import ReactDOM from 'react-dom/client';
 import App from './App';
 import './styles.css';
 import { AptosWalletAdapterProvider } from "@aptos-labs/wallet-adapter-react";
-import { setupAutomaticEthereumWalletDerivation } from "@aptos-labs/derived-wallet-ethereum";
 import { setupAutomaticSolanaWalletDerivation } from "@aptos-labs/derived-wallet-solana";
 import { PropsWithChildren } from "react";
 import { Network } from "@aptos-labs/ts-sdk";
 import { NetworkProvider } from './contexts/NetworkContext';
 
+setupAutomaticSolanaWalletDerivation({ defaultNetwork: Network.TESTNET }); // Network.TESTNET is the Aptos network your dapp is working with
 
 let dappImageURI: string | undefined;
 if (typeof window !== "undefined") {

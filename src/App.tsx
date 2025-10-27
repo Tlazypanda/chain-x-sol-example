@@ -1,9 +1,9 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { Deserializer, Network, SimpleTransaction } from '@aptos-labs/ts-sdk';
+import { Network, Account, Ed25519PrivateKey, AccountAuthenticatorSingleKey, Ed25519PublicKey, Ed25519Signature, AnyPublicKey, AnySignature } from '@aptos-labs/ts-sdk';
 import { useAptosClient, useNetworkContext } from './contexts/NetworkContext';
 import { useWallet } from '@aptos-labs/wallet-adapter-react';
 import WalletPopup from './WalletPopup';
-import { setupAutomaticEthereumWalletDerivation } from '@aptos-labs/derived-wallet-ethereum';
+import { setupAutomaticSolanaWalletDerivation } from '@aptos-labs/derived-wallet-solana';
 import ToastContainer from './ToastContainer';
 import { useToast } from './useToast';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -169,7 +169,85 @@ const safeStringify = (value: unknown): string => {
 const truncate = (value: string, length = 60): string =>
   value.length > length ? `${value.slice(0, length)}...` : value;
 
+// Helper function to handle Solana-derived wallet authenticators
+const convertAuthenticator = (authenticatorData: any): any => {
+  try {
+    // If it's already in the correct format, return as-is
+    if (authenticatorData instanceof AccountAuthenticatorSingleKey) {
+      return authenticatorData;
+    }
 
+    // Check if this is a Solana-derived account authenticator
+    // These have functionInfo, abstractionSignature, signingMessageDigest, accountIdentity
+    if (authenticatorData?.functionInfo && authenticatorData?.abstractionSignature) {
+      console.log('Detected Solana-derived account authenticator - returning as-is');
+      // Solana-derived account authenticators are already in the correct format
+      // The SDK knows how to handle these special authenticators
+      return authenticatorData;
+    }
+
+    // Extract public key and signature from standard nested structure
+    const publicKeyData = authenticatorData?.public_key?.key?.data;
+    const signatureData = authenticatorData?.signature?.data?.data;
+
+    if (publicKeyData && signatureData) {
+      // Convert object with numeric keys to Uint8Array
+      const pubKeyArray = new Uint8Array(Object.values(publicKeyData));
+      const sigArray = new Uint8Array(Object.values(signatureData));
+
+      // Create proper Aptos SDK objects
+      const ed25519PublicKey = new Ed25519PublicKey(pubKeyArray);
+      const ed25519Signature = new Ed25519Signature(sigArray);
+
+      // Wrap in Any* types for AccountAuthenticatorSingleKey
+      const publicKey = new AnyPublicKey(ed25519PublicKey);
+      const signature = new AnySignature(ed25519Signature);
+
+      // Return proper AccountAuthenticator
+      return new AccountAuthenticatorSingleKey(publicKey, signature);
+    }
+
+    // If we can't convert, return as-is and let SDK handle it
+    console.warn('Could not convert authenticator, returning original:', authenticatorData);
+    return authenticatorData;
+  } catch (error) {
+    console.error('Error converting authenticator:', error);
+    return authenticatorData;
+  }
+};
+
+// Sponsor account setup for fee payer
+// In production, this should be stored securely on a backend server
+// For demo purposes, we'll create/retrieve from localStorage
+const getSponsorAccount = (network: Network): Account => {
+  const storageKey = `sponsor-account-${network}`;
+
+  try {
+    // Try to get existing sponsor from localStorage
+    const stored = localStorage.getItem(storageKey);
+    if (stored) {
+      const { privateKey } = JSON.parse(stored);
+      return Account.fromPrivateKey({
+        privateKey: new Ed25519PrivateKey(privateKey)
+      });
+    }
+  } catch (error) {
+    console.warn('Failed to retrieve sponsor account from storage:', error);
+  }
+
+  // Create new sponsor account
+  const newSponsor = Account.generate();
+  try {
+    localStorage.setItem(storageKey, JSON.stringify({
+      privateKey: newSponsor.privateKey.toString(),
+      address: newSponsor.accountAddress.toString()
+    }));
+  } catch (error) {
+    console.warn('Failed to store sponsor account:', error);
+  }
+
+  return newSponsor;
+};
 
 function App() {
   const { selectedAptosNetwork, setSelectedAptosNetwork } = useNetworkContext();
@@ -197,6 +275,10 @@ function App() {
   const [balance, setBalance] = useState<string>('0');
   const [isLoadingBalance, setIsLoadingBalance] = useState(false);
   const [isFaucetLoading, setIsFaucetLoading] = useState(false);
+
+  // Sponsor account for fee payer
+  const [sponsorAccount, setSponsorAccount] = useState<Account | null>(null);
+  const [sponsorBalance, setSponsorBalance] = useState<string>('0');
 
   const mobileActionTabs = [
     {
@@ -256,7 +338,13 @@ function App() {
   };
 
   useEffect(() => {
-    setupAutomaticEthereumWalletDerivation({ defaultNetwork: selectedAptosNetwork });
+    setupAutomaticSolanaWalletDerivation({ defaultNetwork: selectedAptosNetwork });
+  }, [selectedAptosNetwork]);
+
+  // Initialize sponsor account when network changes
+  useEffect(() => {
+    const sponsor = getSponsorAccount(selectedAptosNetwork);
+    setSponsorAccount(sponsor);
   }, [selectedAptosNetwork]);
 
   // Fetch balance function
@@ -280,6 +368,24 @@ function App() {
     }
   };
 
+  // Fetch sponsor balance function
+  const fetchSponsorBalance = async () => {
+    if (!sponsorAccount) {
+      setSponsorBalance('0');
+      return;
+    }
+
+    try {
+      const balance = await aptosClient.getAccountAPTAmount({
+        accountAddress: sponsorAccount.accountAddress.toString()
+      });
+      setSponsorBalance(balance.toString());
+    } catch (error) {
+      console.log('Sponsor account not yet funded:', sponsorAccount.accountAddress.toString());
+      setSponsorBalance('0');
+    }
+  };
+
   // Fetch balance when account or network changes
   useEffect(() => {
     if (connected && account) {
@@ -289,6 +395,13 @@ function App() {
     }
   }, [connected, account, selectedAptosNetwork]);
 
+  // Fetch sponsor balance when sponsor account changes
+  useEffect(() => {
+    if (sponsorAccount) {
+      fetchSponsorBalance();
+    }
+  }, [sponsorAccount, selectedAptosNetwork]);
+
   // Auto-refresh balance every 5 seconds
   useEffect(() => {
     if (!connected || !account) return;
@@ -296,6 +409,14 @@ function App() {
     const interval = setInterval(fetchBalance, 5000);
     return () => clearInterval(interval);
   }, [connected, account, selectedAptosNetwork]);
+
+  // Auto-refresh sponsor balance every 5 seconds
+  useEffect(() => {
+    if (!sponsorAccount) return;
+
+    const interval = setInterval(fetchSponsorBalance, 5000);
+    return () => clearInterval(interval);
+  }, [sponsorAccount, selectedAptosNetwork]);
 
   // Faucet functions
   const handleDevnetFaucet = async () => {
@@ -333,8 +454,49 @@ function App() {
 
   const handleTestnetFaucet = () => {
     if (!account?.address) return;
-    
+
     const faucetUrl = `https://aptos.dev/network/faucet?address=${account.address.toString()}`;
+    window.open(faucetUrl, '_blank');
+  };
+
+  // Sponsor account faucet functions
+  const handleSponsorDevnetFaucet = async () => {
+    if (!sponsorAccount) return;
+
+    try {
+      setIsFaucetLoading(true);
+      const faucetUrl = 'https://faucet.devnet.aptoslabs.com/fund';
+      const response = await fetch(faucetUrl, {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json, text/plain, */*',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          amount: 100000000,
+          address: sponsorAccount.accountAddress.toString(),
+        }),
+      });
+
+      if (response.ok) {
+        showSuccess('Sponsor Faucet Success', '1 APT has been added to sponsor account', 3000);
+        // Refresh sponsor balance after a short delay
+        setTimeout(fetchSponsorBalance, 2000);
+      } else {
+        throw new Error('Sponsor faucet request failed');
+      }
+    } catch (error) {
+      console.error('Sponsor faucet failed:', error);
+      showError('Sponsor Faucet Failed', 'Unable to get tokens for sponsor account', 3000);
+    } finally {
+      setIsFaucetLoading(false);
+    }
+  };
+
+  const handleSponsorTestnetFaucet = () => {
+    if (!sponsorAccount) return;
+
+    const faucetUrl = `https://aptos.dev/network/faucet?address=${sponsorAccount.accountAddress.toString()}`;
     window.open(faucetUrl, '_blank');
   };
 
@@ -484,7 +646,7 @@ function App() {
     }
   };
 
-  // Sign and submit transfer transaction
+  // Sign and submit transfer transaction with fee payer (sponsored transaction)
   const submitTransferTransaction = async () => {
     try {
       setError('');
@@ -497,25 +659,74 @@ function App() {
         throw new Error('Please connect wallet first');
       }
 
-      const { authenticator, rawTransaction } = await signTransaction({
-        transactionOrPayload: {
-          data: {
-            function: "0x1::aptos_account::transfer",
-            functionArguments: [
-              transferRecipient,
-              parseInt(transferAmount)
-            ]
-          },
-          options: {
-            maxGasAmount: 1500,
-            gasUnitPrice: 100,
-          }
+      if (!sponsorAccount) {
+        throw new Error('Sponsor account not initialized');
+      }
+
+      // Check if sponsor has sufficient balance
+      const sponsorBalanceNum = parseInt(sponsorBalance);
+      if (sponsorBalanceNum < 150000) {
+        showError(
+          'Sponsor Account Needs Funding',
+          `The sponsor account (${sponsorAccount.accountAddress.toString().slice(0, 10)}...) needs APT to pay gas fees. Please fund it using the faucet button that will appear.`,
+          8000
+        );
+        throw new Error(`Sponsor account needs funding. Address: ${sponsorAccount.accountAddress.toString()}`);
+      }
+
+      showInfo('Building Transaction', 'Creating sponsored transaction with fee payer...', 2000);
+
+      // Build transaction with fee payer
+      const transaction = await aptosClient.transaction.build.simple({
+        sender: account.address,
+        withFeePayer: true,
+        data: {
+          function: "0x1::aptos_account::transfer",
+          functionArguments: [
+            transferRecipient,
+            parseInt(transferAmount)
+          ]
+        },
+        options: {
+          maxGasAmount: 2000,
+          gasUnitPrice: 100,
         }
       });
 
+      showInfo('Signing Transaction', 'Requesting signature from your wallet...', 2000);
+
+      // User signs the transaction using wallet adapter
+      // const { authenticator: rawSenderAuthenticator } = await signTransaction({
+      //   transactionOrPayload: transaction,
+      // });
+
+      // console.log('Raw sender authenticator:', rawSenderAuthenticator);
+
+      // // Convert authenticator to proper format for Aptos SDK
+      // const senderAuthenticator = convertAuthenticator(rawSenderAuthenticator);
+
+      const walletSignedTransaction = await signTransaction({
+        transactionOrPayload: transaction,
+      });
+      //console.log('Converted sender authenticator:', senderAuthenticator);
+
+      showInfo('Sponsor Signing', 'Sponsor is signing as fee payer...', 2000);
+
+      // Sponsor signs as fee payer
+      const feePayerAuthenticator = aptosClient.transaction.signAsFeePayer({
+        signer: sponsorAccount,
+        transaction
+      });
+
+      console.log('Fee payer authenticator:', feePayerAuthenticator);
+
+      showInfo('Submitting Transaction', 'Sending to blockchain...', 2000);
+
+      // Submit with both authenticators
       const response = await aptosClient.transaction.submit.simple({
-        transaction: SimpleTransaction.deserialize(new Deserializer(rawTransaction)),
-        senderAuthenticator: authenticator
+        transaction,
+        senderAuthenticator: walletSignedTransaction.authenticator,
+        feePayerAuthenticator
       });
 
       const transactionData = {
@@ -537,9 +748,15 @@ function App() {
         timestamp: new Date().toISOString()
       });
       showSuccess('Transaction Submitted Successfully', `Hash: ${response.hash.slice(0, 20)}...${response.hash.slice(-8)}`, 4000);
+
+      // Refresh balances after successful transaction
+      setTimeout(() => {
+        fetchBalance();
+        fetchSponsorBalance(); // Refresh sponsor balance since it paid gas fees
+      }, 2000);
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      showError('Transaction Submission Failed', reason, 4000);
+      showError('Transaction Submission Failed', reason, 6000);
     } finally {
       setIsSigning(false);
     }
@@ -633,7 +850,7 @@ function App() {
   };
 
 
-  // Custom transaction (call contract function)
+  // Custom transaction (call contract function) with fee payer
   const signCustomTransaction = async () => {
     try {
       setError('');
@@ -646,29 +863,61 @@ function App() {
         throw new Error('Please connect wallet first');
       }
 
+      if (!sponsorAccount) {
+        throw new Error('Sponsor account not initialized');
+      }
+
+      // Check if sponsor has sufficient balance
+      const sponsorBalanceNum = parseInt(sponsorBalance);
+      if (sponsorBalanceNum < 150000) {
+        showError(
+          'Sponsor Account Needs Funding',
+          `The sponsor account (${sponsorAccount.accountAddress.toString().slice(0, 10)}...) needs APT to pay gas fees. Address: ${sponsorAccount.accountAddress.toString()}`,
+          8000
+        );
+        throw new Error(`Sponsor account needs funding. Address: ${sponsorAccount.accountAddress.toString()}`);
+      }
+
       // Filter empty generic parameters and function arguments
       const validGenericParams = customGenericParams.filter(param => param.trim() !== '');
       const validArguments = customArguments.filter(arg => arg.trim() !== '');
 
-      const { authenticator, rawTransaction } = await signTransaction({
-        transactionOrPayload: {
-          data: {
-            function: customFunction as `${string}::${string}::${string}`,
-            typeArguments: validGenericParams as `${string}::${string}::${string}`[],
-            functionArguments: validArguments
-          },
-          options: {
-            maxGasAmount: parseInt(customMaxGas),
-            gasUnitPrice: parseInt(customGasPrice),
-          }
+      showInfo('Building Transaction', 'Creating sponsored custom transaction...', 2000);
+
+      // Build transaction with fee payer
+      const transaction = await aptosClient.transaction.build.simple({
+        sender: account.address,
+        withFeePayer: true,
+        data: {
+          function: customFunction as `${string}::${string}::${string}`,
+          typeArguments: validGenericParams as `${string}::${string}::${string}`[],
+          functionArguments: validArguments
+        },
+        options: {
+          maxGasAmount: parseInt(customMaxGas),
+          gasUnitPrice: parseInt(customGasPrice),
         }
       });
+
+      showInfo('Signing Transaction', 'Requesting signature from your wallet...', 2000);
+
+      // User signs the transaction using wallet adapter
+      const { authenticator: rawSenderAuthenticator } = await signTransaction({
+        transactionOrPayload: transaction,
+      });
+
+      console.log('Custom tx - Raw sender authenticator:', rawSenderAuthenticator);
+
+      // Convert authenticator to proper format for Aptos SDK
+      const senderAuthenticator = convertAuthenticator(rawSenderAuthenticator);
+
+      console.log('Custom tx - Converted sender authenticator:', senderAuthenticator);
 
       // Set signature info for custom transaction
       setSignatureInfo({
         type: 'custom_sign',
-        authenticator: authenticator,
-        rawTransaction: rawTransaction,
+        authenticator: senderAuthenticator,
+        rawTransaction: transaction,
         function: customFunction,
         typeArguments: validGenericParams,
         arguments: validArguments,
@@ -677,9 +926,23 @@ function App() {
         timestamp: new Date().toISOString()
       });
 
+      showInfo('Sponsor Signing', 'Sponsor is signing as fee payer...', 2000);
+
+      // Sponsor signs as fee payer
+      const feePayerAuthenticator = aptosClient.transaction.signAsFeePayer({
+        signer: sponsorAccount,
+        transaction
+      });
+
+      console.log('Custom tx - Fee payer authenticator:', feePayerAuthenticator);
+
+      showInfo('Submitting Transaction', 'Sending to blockchain...', 2000);
+
+      // Submit with both authenticators
       const response = await aptosClient.transaction.submit.simple({
-        transaction: SimpleTransaction.deserialize(new Deserializer(rawTransaction)),
-        senderAuthenticator: authenticator
+        transaction,
+        senderAuthenticator,
+        feePayerAuthenticator
       });
 
       const customData = {
@@ -707,6 +970,13 @@ function App() {
         timestamp: new Date().toISOString()
       });
       showSuccess('Custom Transaction Successful', `Hash: ${response.hash.slice(0, 20)}...${response.hash.slice(-8)}`, 4000);
+
+      // Refresh balances after successful transaction
+      setTimeout(() => {
+        fetchBalance();
+        fetchSponsorBalance(); // Refresh sponsor balance since it paid gas fees
+      }, 2000);
+
       console.log(response)
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
@@ -806,6 +1076,61 @@ function App() {
               Get Testnet APT
             </button>
           )}
+
+          {/* Sponsor Account Info - Important for Solana wallets */}
+          <div className="border-t border-gray-200 pt-4 mt-4">
+            <div className="flex items-center justify-between mb-2">
+              <h4 className="text-sm font-semibold text-gray-700">Gas Fee Sponsor</h4>
+              <span className={`text-xs px-2 py-1 rounded ${parseInt(sponsorBalance) > 150000 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                {parseInt(sponsorBalance) > 150000 ? 'Funded' : 'Needs Funding'}
+              </span>
+            </div>
+            <p className="text-xs text-gray-500 mb-2">
+              Solana wallets require a sponsor to pay gas fees
+            </p>
+            <div className="bg-gray-50 rounded p-2 mb-2">
+              <p className="text-xs text-gray-500 mb-1">Sponsor Address</p>
+              <div className="flex items-center space-x-2">
+                <code className="text-xs font-mono text-gray-700 flex-1 truncate">
+                  {sponsorAccount?.accountAddress.toString()}
+                </code>
+                <button
+                  onClick={() => copyToClipboard(sponsorAccount?.accountAddress.toString() || '', 'Sponsor Address')}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                  </svg>
+                </button>
+              </div>
+              <p className="text-xs text-gray-600 mt-1">
+                Balance: {(parseFloat(sponsorBalance) / 100000000).toFixed(4)} APT
+              </p>
+            </div>
+
+            {/* Sponsor Faucet buttons */}
+            {parseInt(sponsorBalance) < 150000 && (
+              <>
+                {selectedAptosNetwork === Network.DEVNET && (
+                  <button
+                    onClick={handleSponsorDevnetFaucet}
+                    disabled={isFaucetLoading}
+                    className="w-full px-3 py-2 text-xs text-orange-600 border border-orange-200 rounded-lg hover:bg-orange-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed mb-2"
+                  >
+                    {isFaucetLoading ? 'Funding Sponsor...' : '⛽ Fund Sponsor (1 APT)'}
+                  </button>
+                )}
+                {selectedAptosNetwork === Network.TESTNET && (
+                  <button
+                    onClick={handleSponsorTestnetFaucet}
+                    className="w-full px-3 py-2 text-xs text-orange-600 border border-orange-200 rounded-lg hover:bg-orange-50 transition-colors mb-2"
+                  >
+                    ⛽ Fund Sponsor (Testnet)
+                  </button>
+                )}
+              </>
+            )}
+          </div>
 
           <button
             onClick={handleWalletDisconnect}

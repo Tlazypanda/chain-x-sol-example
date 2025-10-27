@@ -1,5 +1,5 @@
 {
-  "name": "chain-x-eth-example",
+  "name": "chain-x-sol-example",
   "private": true,
   "version": "0.0.1",
   "type": "module",
@@ -10,9 +10,8 @@
     "lint": "eslint . --ext ts,tsx"
   },
   "dependencies": {
-    "@aptos-labs/derived-wallet-ethereum": "^0.8.0",
-    "@aptos-labs/derived-wallet-solana": "^0.8.0",
-    "@aptos-labs/ts-sdk": "^5.1.0",
+    "@aptos-labs/derived-wallet-solana": "^0.8.1",
+    "@aptos-labs/ts-sdk": "^5.1.1",
     "@aptos-labs/wallet-adapter-core": "^7.4.0",
     "@aptos-labs/wallet-adapter-react": "^7.1.0",
     "@aptos-labs/wallet-standard": "^0.5.2",

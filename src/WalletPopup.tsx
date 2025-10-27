@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { AdapterWallet } from "@aptos-labs/wallet-adapter-core"
 import { AccountAddress } from "@aptos-labs/ts-sdk"
 import { useWallet } from "@aptos-labs/wallet-adapter-react"
-import { EIP1193DerivedWallet } from "@aptos-labs/derived-wallet-ethereum"
+import { SolanaDerivedWallet } from "@aptos-labs/derived-wallet-solana"
 
 
 interface WalletPopupProps {
@@ -81,13 +81,13 @@ const WalletPopup: React.FC<WalletPopupProps> = ({
         
         <div className="wallet-popup-content">
           <p className="mb-6 text-sm leading-relaxed text-slate-500">
-            Choose an Ethereum wallet to derive an Aptos address instantly. Installed wallets appear first, and you can install new options below.
+            Choose a Solana wallet to derive an Aptos address instantly. Installed wallets appear first, and you can install new options below.
           </p>
           {wallets.length > 0 && (
             <div className="wallet-section">
               <h3>Installed Wallets</h3>
               <div className="wallet-list">
-                {wallets.filter((walletItem: AdapterWallet) => walletItem.name.toLocaleLowerCase().includes("ethereum") ).map((walletItem: AdapterWallet, index: number) => {
+                {wallets.filter((walletItem: AdapterWallet) => walletItem.name.toLocaleLowerCase().includes("solana") || walletItem.name.toLocaleLowerCase().includes("phantom") || walletItem.name.toLocaleLowerCase().includes("solflare") || walletItem.name.toLocaleLowerCase().includes("backpack")).map((walletItem: AdapterWallet, index: number) => {
                   // Use useWallet state to determine connection status
                   const isConnected = connected && wallet?.name === walletItem.name;
                   const isConnectingThis = isConnecting === walletItem.name;
@@ -140,7 +140,7 @@ const WalletPopup: React.FC<WalletPopupProps> = ({
             <div className="wallet-section">
               <h3>Not Installed Wallets</h3>
               <div className="wallet-list">
-                {notDetectedWallets.filter((wallet: AdapterWallet) => wallet.name.toLocaleLowerCase().includes("ethereum") ).map((wallet: AdapterWallet, index: number) => (
+                {notDetectedWallets.filter((wallet: AdapterWallet) => wallet.name.toLocaleLowerCase().includes("solana") || wallet.name.toLocaleLowerCase().includes("phantom") || wallet.name.toLocaleLowerCase().includes("solflare") || wallet.name.toLocaleLowerCase().includes("backpack")).map((wallet: AdapterWallet, index: number) => (
                   <div
                     key={index}
                     className="wallet-item not-installed"

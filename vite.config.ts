@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig({
-  base: '/chain-x-eth-example/',
+  base: '/chain-x-sol-example/',
   plugins: [react(), tailwindcss()],
   server: {
     port: 5173
